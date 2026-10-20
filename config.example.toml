@@ -35,5 +35,8 @@ comment_chars = 400
 comment_max_per_poll = 10
 # Authors whose comments must not trigger a notification (display names).
 authors_exclude = []
+# Project keys with no notifications at all (OPS-123 -> "OPS"); case-insensitive.
+# Changes are still remembered, so taking a project off the list never replays history.
+projects_exclude = []
 # true = the first run only remembers current issues instead of spamming history.
 seed = true

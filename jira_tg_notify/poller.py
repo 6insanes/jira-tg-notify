@@ -120,6 +120,15 @@ class Poller:
         if old is not None and old.updated == new.updated and old.status == new.status:
             return 0, budget
 
+        if jcfg.excludes_project(new.project):
+            self.log(
+                f"{key}: project {new.project} is in projects_exclude, not notified"
+            )
+            new.comment_id = old.comment_id if old is not None else None
+            store.upsert(key, new)
+            known[key] = new
+            return 0, budget
+
         comments = self._fetch_comments(
             key, old, new, seeding=seeding, comments_on=comments_on
         )

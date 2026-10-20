@@ -58,6 +58,7 @@ def make_jira(**overrides) -> JiraConfig:
         comment_chars=400,
         comment_max_per_poll=10,
         authors_exclude=[],
+        projects_exclude=[],
     )
     base.update(overrides)
     return JiraConfig(**base)
@@ -82,6 +83,7 @@ def make_issue(
     priority="High",
     updated=None,
     created=None,
+    project="TEST",
 ):
     now = time.time()
 
@@ -95,7 +97,7 @@ def make_issue(
             "status": {"name": status},
             "assignee": {"displayName": assignee} if assignee else None,
             "priority": {"name": priority},
-            "project": {"key": "TEST"},
+            "project": {"key": project},
             "created": to_jira(created if created is not None else now - 3600),
             "updated": to_jira(updated if updated is not None else now),
         },
@@ -422,6 +424,72 @@ class TestComments(PollerTestCase):
         self.assertNotIn("я" * 30, text)
 
 
+class TestProjectsExclude(PollerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.jira.events = {"created", "status", "assignee", "priority", "comment"}
+
+    def test_change_is_silent_but_remembered(self):
+        self.jira.projects_exclude = ["ops"]
+        self.feed.issues = [make_issue(key="OPS-1", project="OPS", status="A")]
+        self.poller.poll_once(dry_run=True)
+
+        self.feed.issues = [make_issue(key="OPS-1", project="OPS", status="B")]
+        self.assertEqual(0, self.poller.poll_once(dry_run=True))
+        self.assertEqual("B", self.stored()["OPS-1"].status)
+
+    def test_other_projects_still_notify(self):
+        self.jira.projects_exclude = ["OPS"]
+        self.feed.issues = [
+            make_issue(key="OPS-1", project="OPS", status="A"),
+            make_issue(key="TEST-1", project="TEST", status="A"),
+        ]
+        self.poller.poll_once(dry_run=True)
+
+        self.feed.issues = [
+            make_issue(key="OPS-1", project="OPS", status="B"),
+            make_issue(key="TEST-1", project="TEST", status="B"),
+        ]
+        self.assertEqual(1, self.poller.poll_once(dry_run=True))
+
+    def test_new_issue_is_silent(self):
+        self.jira.projects_exclude = ["OPS"]
+        self.feed.issues = [make_issue(key="TEST-1", status="A")]
+        self.poller.poll_once(dry_run=True)
+
+        self.feed.issues = [
+            make_issue(key="TEST-1", status="A"),
+            make_issue(key="OPS-1", project="OPS", created=time.time() - 60),
+        ]
+        self.assertEqual(0, self.poller.poll_once(dry_run=True))
+        self.assertIn("OPS-1", self.stored())
+
+    def test_comments_are_not_requested(self):
+        self.feed.issues = [make_issue(key="OPS-1", project="OPS")]
+        self.feed.comments = {"OPS-1": [make_comment(10)]}
+        self.poller.poll_once(dry_run=True)
+        self.assertEqual(10, self.stored()["OPS-1"].comment_id)
+
+        self.jira.projects_exclude = ["OPS"]
+        self.feed.comment_calls.clear()
+        self.feed.issues = [make_issue(key="OPS-1", project="OPS", status="B")]
+        self.assertEqual(0, self.poller.poll_once(dry_run=True))
+        self.assertEqual([], self.feed.comment_calls)
+        self.assertEqual(10, self.stored()["OPS-1"].comment_id)
+
+    def test_taking_project_off_the_list_does_not_replay(self):
+        self.feed.issues = [make_issue(key="OPS-1", project="OPS", status="A")]
+        self.poller.poll_once(dry_run=True)
+
+        self.jira.projects_exclude = ["OPS"]
+        self.feed.issues = [make_issue(key="OPS-1", project="OPS", status="B")]
+        self.assertEqual(0, self.poller.poll_once(dry_run=True))
+
+        self.jira.projects_exclude = []
+        self.assertEqual(0, self.poller.poll_once(dry_run=True))
+        self.assertEqual([], self.telegram.sent)
+
+
 class TestConfig(unittest.TestCase):
     def test_load_defaults(self):
         path = tmpdir() / "config.toml"
@@ -471,6 +539,24 @@ state_db = "~/new/state.db"
         self.assertEqual(30, parse_interval(30))
         self.assertEqual(30, parse_interval("30s"))
         self.assertEqual(3600, parse_interval("1h"))
+
+    def test_projects_exclude_is_case_insensitive(self):
+        path = tmpdir() / "config.toml"
+        path.write_text(
+            """
+[jira]
+server = "https://jira.example.com"
+
+[notify]
+projects_exclude = ["OPS", "support"]
+"""
+        )
+
+        cfg = load_config(path)
+        self.assertTrue(cfg.jira.excludes_project("OPS"))
+        self.assertTrue(cfg.jira.excludes_project("support"))
+        self.assertFalse(cfg.jira.excludes_project("TEST"))
+        self.assertFalse(cfg.jira.excludes_project(""))
 
 
 if __name__ == "__main__":

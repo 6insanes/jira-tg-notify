@@ -29,7 +29,15 @@ class JiraConfig:
     comment_chars: int
     comment_max_per_poll: int
     authors_exclude: list[str] = field(default_factory=list)
+    projects_exclude: list[str] = field(default_factory=list)
     legacy_state_file: Path | None = None
+
+    def excludes_project(self, project: str) -> bool:
+        """True when the project key is in ``notify.projects_exclude`` (any case)."""
+        key = (project or "").strip().upper()
+        return bool(key) and key in {
+            str(p).strip().upper() for p in self.projects_exclude
+        }
 
 
 @dataclass
@@ -116,6 +124,7 @@ def load_config(path: Path) -> Config:
         comment_chars=int(nt.get("comment_chars", 400)),
         comment_max_per_poll=int(nt.get("comment_max_per_poll", 10)),
         authors_exclude=list(nt.get("authors_exclude", [])),
+        projects_exclude=list(nt.get("projects_exclude", [])),
     )
 
     telegram = TelegramConfig(
