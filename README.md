@@ -73,7 +73,28 @@ journalctl --user -u jira-tg-notify -f
 
 ## Состояние и дедупликация
 
-`~/.local/state/jira-tg-notify/state.json` — снимок задач (`updated`, статус, исполнитель, приоритет, заголовок). Записи старше 30 дней вычищаются. Удаление файла = повторный seed без уведомлений.
+`~/.local/state/jira-tg-notify/state.db` — SQLite-база со снимком задач (`updated`, статус, исполнитель, приоритет, заголовок, `comment_id`). Записи старше 30 дней вычищаются. Удаление базы = повторный seed без уведомлений.
+
+При первом запуске версии 2.0 старый `state.json` импортируется в базу и переименовывается в `state.json.migrated` — повторных уведомлений не будет. Если нечитаемый JSON, он уходит в `state.json.invalid`, а работа начинается с пустого состояния. Явно задать путь можно через `notify.state_db`; старый ключ `notify.state_file` продолжает работать (суффикс меняется на `.db`).
+
+## Структура кода
+
+```text
+jira_tg_notify.py            точка входа (её запускает systemd)
+jira_tg_notify/
+  config.py       TOML -> dataclasses, пути состояния
+  jira.py         Jira REST: поиск по JQL, комментарии
+  telegram.py     Bot API: отправка, ретрай 429, --discover, --test
+  models.py       IssueSnapshot и работа с комментариями
+  events.py       какие уведомления порождает изменение
+  formatting.py   текст сообщений (HTML, чистка wiki-разметки)
+  storage.py      SQLite-состояние и импорт старого JSON
+  poller.py       цикл опроса
+  cli.py          разбор аргументов
+tests/test_notify.py
+```
+
+Зависимости передаются через конструкторы (`JiraClient(fetch=...)`, `Poller(jira=..., telegram=...)`), поэтому тесты не патчат глобальные функции. Полный прогон: `python3 -m unittest discover -s tests`.
 
 ## Ограничения Jira Server (проверено на 9.16.1)
 

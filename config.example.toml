@@ -25,7 +25,9 @@ login = ""
 jql = "updated >= -10m ORDER BY updated ASC"
 interval = 60
 window_minutes = 10
-state_file = "~/.local/state/jira-tg-notify/state.json"
+state_db = "~/.local/state/jira-tg-notify/state.db"
+# Старый JSON-файл состояния (до 2.0) импортируется один раз и переименовывается.
+# state_file = "~/.local/state/jira-tg-notify/state.json"
 # created = new issues, status/assignee/priority = field changes, comment = new comments.
 events = ["created", "status", "assignee", "priority", "comment"]
 # Comment notifications: excerpt length in characters and cap per poll.
