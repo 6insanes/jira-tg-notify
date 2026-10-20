@@ -39,6 +39,16 @@ def display_name(person: dict | None) -> str:
     return person.get("displayName") or person.get("name") or EMPTY
 
 
+def same_person(a: dict | None, b: dict | None) -> bool:
+    """Match two Jira user objects by username first, then id, then display name."""
+    if not a or not b:
+        return False
+    for field in ("name", "key"):
+        if a.get(field) and b.get(field):
+            return a[field] == b[field]
+    return a.get("displayName") == b.get("displayName")
+
+
 def build_snapshot(issue: dict, server: str) -> IssueSnapshot:
     fields = issue["fields"]
     key = issue["key"]

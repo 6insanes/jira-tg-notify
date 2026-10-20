@@ -7,7 +7,7 @@ import time
 import urllib.error
 
 from .config import Config
-from .events import detect_events
+from .events import FIELD_EVENTS, detect_events
 from .formatting import compose, compose_comment
 from .jira import JiraClient
 from .log import log
@@ -15,8 +15,10 @@ from .models import (
     IssueSnapshot,
     build_snapshot,
     display_name,
+    epoch,
     max_comment_id,
     pick_new_comments,
+    same_person,
 )
 from .storage import StateStore
 from .telegram import TelegramClient
@@ -36,6 +38,20 @@ class Poller:
         self.jira = jira or JiraClient(cfg.jira)
         self.telegram = telegram or TelegramClient(cfg.telegram)
         self.log = log_fn
+        self._me: dict | None = None
+
+    def me(self) -> dict:
+        """The Jira user behind the token, cached; empty when it cannot be read."""
+        if self._me is None:
+            try:
+                self._me = self.jira.myself() or {}
+            except (RuntimeError, SystemExit, urllib.error.URLError) as err:
+                self.log(
+                    f"cannot detect the current Jira user ({err}): "
+                    "own actions will still notify"
+                )
+                self._me = {}
+        return self._me
 
     def poll_once(self, dry_run: bool = False, verbose: bool = False) -> int:
         """Run one poll and return the number of messages sent."""
@@ -139,7 +155,7 @@ class Poller:
             known[key] = new
             return 0, budget
 
-        sent = self._notify_changes(key, old, new, now, dry_run)
+        sent = self._notify_changes(issue, key, old, new, now, dry_run)
 
         if comments_on:
             comment_sent, budget = self._notify_comments(
@@ -167,17 +183,60 @@ class Poller:
 
     def _notify_changes(
         self,
+        issue: dict,
         key: str,
         old: IssueSnapshot | None,
         new: IssueSnapshot,
         now: float,
         dry_run: bool,
     ) -> int:
+        events = detect_events(old, new, self.cfg.jira, now)
+        mine = self._my_actions(issue, key, old, events)
         sent = 0
-        for event in detect_events(old, new, self.cfg.jira, now):
+        for event in events:
+            if event in mine:
+                self.log(f"{key}: {event} change is mine, not notified")
+                continue
             self._send(compose(event, key, new, old), key, event, dry_run)
             sent += 1
         return sent
+
+    def _my_actions(
+        self,
+        issue: dict,
+        key: str,
+        old: IssueSnapshot | None,
+        events: list[str],
+    ) -> set[str]:
+        """Which of the detected events were caused by the token's own user."""
+        if not self.cfg.jira.ignore_self or not events:
+            return set()
+
+        me = self.me()
+        if not me:
+            return set()
+
+        if old is None:
+            creator = (issue.get("fields") or {}).get("creator")
+            return {"created"} if same_person(creator, me) else set()
+
+        tracked = {event for event in events if event in FIELD_EVENTS}
+        if not tracked:
+            return set()
+
+        latest: dict[str, tuple[float, dict | None]] = {}
+        for history in self.jira.changelog(key):
+            stamp = epoch(history.get("created"))
+            for item in history.get("items") or []:
+                field = item.get("field")
+                if field and (field not in latest or stamp >= latest[field][0]):
+                    latest[field] = (stamp, history.get("author"))
+
+        return {
+            field
+            for field in tracked
+            if same_person(latest.get(field, (0.0, None))[1], me)
+        }
 
     def _notify_comments(
         self,
@@ -190,10 +249,12 @@ class Poller:
     ) -> tuple[int, int]:
         jcfg = self.cfg.jira
         last_id = old.comment_id if old is not None else None
+        me = self.me() if jcfg.ignore_self else {}
         fresh = [
             c
             for c in pick_new_comments(comments, last_id or 0)
             if display_name(c.get("author")) not in jcfg.authors_exclude
+            and not (me and same_person(c.get("author"), me))
         ]
 
         sent = 0

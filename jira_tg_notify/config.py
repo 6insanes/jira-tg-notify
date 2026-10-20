@@ -30,6 +30,7 @@ class JiraConfig:
     comment_max_per_poll: int
     authors_exclude: list[str] = field(default_factory=list)
     projects_exclude: list[str] = field(default_factory=list)
+    ignore_self: bool = False
     legacy_state_file: Path | None = None
 
     def excludes_project(self, project: str) -> bool:
@@ -125,6 +126,7 @@ def load_config(path: Path) -> Config:
         comment_max_per_poll=int(nt.get("comment_max_per_poll", 10)),
         authors_exclude=list(nt.get("authors_exclude", [])),
         projects_exclude=list(nt.get("projects_exclude", [])),
+        ignore_self=bool(nt.get("ignore_self", False)),
     )
 
     telegram = TelegramConfig(

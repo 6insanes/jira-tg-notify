@@ -59,6 +59,7 @@ def make_jira(**overrides) -> JiraConfig:
         comment_max_per_poll=10,
         authors_exclude=[],
         projects_exclude=[],
+        ignore_self=False,
     )
     base.update(overrides)
     return JiraConfig(**base)
@@ -76,6 +77,10 @@ def make_config(jira: JiraConfig | None = None) -> Config:
     )
 
 
+def to_jira(ts) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime(JIRA_FMT)
+
+
 def make_issue(
     key="TEST-1",
     status="На проверке",
@@ -84,11 +89,10 @@ def make_issue(
     updated=None,
     created=None,
     project="TEST",
+    creator="Пётр",
+    creator_name="petr",
 ):
     now = time.time()
-
-    def to_jira(ts):
-        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime(JIRA_FMT)
 
     return {
         "key": key,
@@ -98,18 +102,27 @@ def make_issue(
             "assignee": {"displayName": assignee} if assignee else None,
             "priority": {"name": priority},
             "project": {"key": project},
+            "creator": {"displayName": creator, "name": creator_name},
             "created": to_jira(created if created is not None else now - 3600),
             "updated": to_jira(updated if updated is not None else now),
         },
     }
 
 
-def make_comment(cid, author="Пётр", body="Текст комментария"):
+def make_comment(cid, author="Пётр", body="Текст комментария", name=None):
     return {
         "id": str(cid),
-        "author": {"displayName": author, "name": author.lower()},
+        "author": {"displayName": author, "name": name or author.lower()},
         "body": body,
         "created": "2026-10-20T10:00:00.000+0300",
+    }
+
+
+def make_history(field="status", author="Пётр", name="petr", created=None):
+    return {
+        "created": to_jira(created if created is not None else time.time()),
+        "author": {"displayName": author, "name": name},
+        "items": [{"field": field}],
     }
 
 
@@ -118,6 +131,9 @@ class FakeJira:
         self.issues: list[dict] = []
         self.comments: dict[str, list[dict]] = {}
         self.comment_calls: list[str] = []
+        self.histories: dict[str, list[dict]] = {}
+        self.changelog_calls: list[str] = []
+        self.me = {"name": "igor", "key": "JIRAUSER1", "displayName": "Игорь"}
 
     def search(self, jql=None):
         return self.issues
@@ -125,6 +141,13 @@ class FakeJira:
     def comment_list(self, key):
         self.comment_calls.append(key)
         return self.comments.get(key, [])
+
+    def myself(self):
+        return self.me
+
+    def changelog(self, key):
+        self.changelog_calls.append(key)
+        return self.histories.get(key, [])
 
 
 class FakeTelegram:
@@ -490,6 +513,88 @@ class TestProjectsExclude(PollerTestCase):
         self.assertEqual([], self.telegram.sent)
 
 
+class TestIgnoreSelf(PollerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.jira.ignore_self = True
+        self.jira.events = {"created", "status", "assignee", "priority", "comment"}
+        self.feed.issues = [make_issue(key="TEST-1", status="A")]
+        self.feed.comments = {"TEST-1": [make_comment(10)]}
+        self.assertEqual(0, self.poller.poll_once(dry_run=True))
+
+    def poll(self, status="B", **issue_kwargs):
+        self.feed.issues = [make_issue(key="TEST-1", status=status, **issue_kwargs)]
+        return self.poller.poll_once(dry_run=True)
+
+    def test_own_status_change_is_silent(self):
+        self.feed.histories["TEST-1"] = [
+            make_history("status", author="Игорь", name="igor")
+        ]
+        self.assertEqual(0, self.poll())
+        self.assertEqual("B", self.stored()["TEST-1"].status)
+
+    def test_foreign_status_change_notifies(self):
+        self.feed.histories["TEST-1"] = [make_history("status")]
+        self.assertEqual(1, self.poll())
+
+    def test_only_own_fields_are_muted(self):
+        self.feed.histories["TEST-1"] = [
+            make_history("status", author="Игорь", name="igor"),
+            make_history("priority"),
+        ]
+        self.assertEqual(1, self.poll(priority="Low"))
+
+    def test_latest_change_wins(self):
+        now = time.time()
+        self.feed.histories["TEST-1"] = [
+            make_history("status", author="Игорь", name="igor", created=now - 30),
+            make_history("status", author="Пётр", name="petr", created=now),
+        ]
+        self.assertEqual(1, self.poll())
+
+    def test_own_comment_is_silent_but_remembered(self):
+        self.feed.comments = {
+            "TEST-1": [make_comment(10), make_comment(11, author="Игорь", name="igor")]
+        }
+        self.assertEqual(0, self.poll(status="A"))
+        self.assertEqual(11, self.stored()["TEST-1"].comment_id)
+
+    def test_comment_by_colleague_notifies(self):
+        self.feed.comments = {
+            "TEST-1": [make_comment(10), make_comment(11, author="Анна")]
+        }
+        self.assertEqual(1, self.poll(status="A"))
+
+    def test_own_issue_creation_is_silent(self):
+        self.feed.issues = [
+            make_issue(key="TEST-1", status="A"),
+            make_issue(
+                key="TEST-2",
+                created=time.time() - 60,
+                creator="Игорь",
+                creator_name="igor",
+            ),
+        ]
+        self.assertEqual(0, self.poller.poll_once(dry_run=True))
+        self.assertIn("TEST-2", self.stored())
+
+    def test_issue_created_by_colleague_notifies(self):
+        self.feed.issues = [
+            make_issue(key="TEST-1", status="A"),
+            make_issue(key="TEST-2", created=time.time() - 60),
+        ]
+        self.assertEqual(1, self.poller.poll_once(dry_run=True))
+
+    def test_off_by_default(self):
+        self.jira.ignore_self = False
+        self.feed.histories["TEST-1"] = [
+            make_history("status", author="Игорь", name="igor")
+        ]
+
+        self.assertEqual(1, self.poll())
+        self.assertEqual([], self.feed.changelog_calls)
+
+
 class TestConfig(unittest.TestCase):
     def test_load_defaults(self):
         path = tmpdir() / "config.toml"
@@ -557,6 +662,19 @@ projects_exclude = ["OPS", "support"]
         self.assertTrue(cfg.jira.excludes_project("support"))
         self.assertFalse(cfg.jira.excludes_project("TEST"))
         self.assertFalse(cfg.jira.excludes_project(""))
+
+    def test_ignore_self(self):
+        path = tmpdir() / "config.toml"
+        path.write_text(
+            """
+[jira]
+server = "https://jira.example.com"
+
+[notify]
+ignore_self = true
+"""
+        )
+        self.assertTrue(load_config(path).jira.ignore_self)
 
 
 if __name__ == "__main__":

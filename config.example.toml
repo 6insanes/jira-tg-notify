@@ -38,5 +38,8 @@ authors_exclude = []
 # Project keys with no notifications at all (OPS-123 -> "OPS"); case-insensitive.
 # Changes are still remembered, so taking a project off the list never replays history.
 projects_exclude = []
+# Skip notifications about your own actions: your comments, your status/assignee/
+# priority changes and issues you created. The user is resolved from the token.
+ignore_self = false
 # true = the first run only remembers current issues instead of spamming history.
 seed = true

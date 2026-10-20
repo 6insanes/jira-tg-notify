@@ -9,7 +9,7 @@ import urllib.parse
 from .config import JiraConfig
 from .http import get_json
 
-FIELDS = "summary,status,assignee,priority,project,issuetype,created,updated"
+FIELDS = "summary,status,assignee,priority,project,issuetype,created,updated,creator"
 PAGE_SIZE = 100
 MAX_RESULTS = 1000
 COMMENT_PAGE = 100
@@ -57,6 +57,7 @@ class JiraClient:
         self.cfg = cfg
         self._fetch = fetch
         self._headers = auth_header(cfg)
+        self._me: dict | None = None
 
     def search(self, jql: str | None = None) -> list[dict]:
         issues: list[dict] = []
@@ -96,3 +97,21 @@ class JiraClient:
             self._headers,
         )
         return data.get("comments", [])
+
+    def myself(self) -> dict:
+        """The user behind the token, used to mute their own changes."""
+        if self._me is None:
+            self._me = self._fetch(
+                f"{self.cfg.server}/rest/api/2/myself", self._headers
+            )
+        return self._me
+
+    def changelog(self, key: str) -> list[dict]:
+        """Full changelog of an issue; Jira Server has no paged changelog resource."""
+        quoted = urllib.parse.quote(key)
+        data = self._fetch(
+            f"{self.cfg.server}/rest/api/2/issue/{quoted}"
+            "?expand=changelog&fields=summary",
+            self._headers,
+        )
+        return (data.get("changelog") or {}).get("histories") or []
