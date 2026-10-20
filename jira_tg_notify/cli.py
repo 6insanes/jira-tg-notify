@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 
+from .commands import Commander
 from .config import Config, expand, load_config
 from .log import log
 from .poller import Poller
@@ -67,5 +68,8 @@ def dispatch(cfg: Config, args: argparse.Namespace) -> int:
         f"polling {cfg.jira.jql!r} every {cfg.jira.interval}s "
         f"-> chat {cfg.telegram.chat_id or '(unset)'}"
     )
-    Poller(cfg, telegram=telegram).run(args.dry_run, args.once, args.verbose)
+    commander = Commander(cfg, telegram) if cfg.telegram.token else None
+    Poller(cfg, telegram=telegram, commander=commander).run(
+        args.dry_run, args.once, args.verbose
+    )
     return 0

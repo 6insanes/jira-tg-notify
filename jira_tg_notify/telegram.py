@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.error
+import urllib.parse
 
 from .config import TelegramConfig
 from .http import get_json, post_json
@@ -73,8 +74,26 @@ class TelegramClient:
                 log(f"{err}; retrying in {delay}s")
                 time.sleep(delay)
 
+    def get_updates(self, offset: int | None = None, timeout: int = 0) -> list[dict]:
+        """Pending updates; ``timeout`` > 0 turns this into a long poll."""
+        query: dict[str, int] = {"timeout": timeout}
+        if offset:
+            query["offset"] = offset
+        return self.call("getUpdates?" + urllib.parse.urlencode(query)).get(
+            "result", []
+        )
+
+    def set_commands(self, commands: tuple[tuple[str, str], ...]) -> None:
+        payload = {
+            "commands": [
+                {"command": name, "description": description}
+                for name, description in commands
+            ]
+        }
+        self.call("setMyCommands", payload)
+
     def discover_chats(self) -> list[tuple[str, str]]:
-        updates = self.call("getUpdates?timeout=0").get("result", [])
+        updates = self.get_updates()
         seen: dict[str, str] = {}
 
         for update in updates:

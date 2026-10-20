@@ -9,7 +9,8 @@ Layout:
     formatting  Telegram HTML message text
     storage     SQLite state store (+ legacy JSON import)
     poller      the poll loop
+    commands    Telegram commands for the project blacklist
     cli         argparse entry point
 """
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"

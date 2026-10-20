@@ -9,10 +9,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from jira_tg_notify.commands import Commander  # noqa: E402
 from jira_tg_notify.config import (  # noqa: E402
     Config,
     JiraConfig,
+    OFFSET_SETTING,
     TelegramConfig,
+    effective_exclusions,
     load_config,
     parse_interval,
 )
@@ -156,6 +159,29 @@ class FakeTelegram:
 
     def send_message(self, text, dry_run=False):
         self.sent.append(text)
+
+
+class FakeBot(FakeTelegram):
+    def __init__(self):
+        super().__init__()
+        self.updates: list[dict] = []
+        self.offsets: list[int | None] = []
+        self.commands = None
+
+    def get_updates(self, offset=None, timeout=0):
+        self.offsets.append(offset)
+        batch, self.updates = self.updates, []
+        return batch
+
+    def set_commands(self, commands):
+        self.commands = commands
+
+
+def bot_message(text, chat_id=-100500, update_id=1):
+    return {
+        "update_id": update_id,
+        "message": {"chat": {"id": chat_id}, "text": text},
+    }
 
 
 class PollerTestCase(unittest.TestCase):
@@ -595,6 +621,82 @@ class TestIgnoreSelf(PollerTestCase):
         self.assertEqual([], self.feed.changelog_calls)
 
 
+class TestCommander(unittest.TestCase):
+    def setUp(self):
+        self.jira = make_jira(projects_exclude=["HSNS"])
+        self.cfg = make_config(self.jira)
+        self.cfg.telegram.chat_id = "-100500"
+        self.bot = FakeBot()
+        self.commander = Commander(
+            self.cfg, telegram=self.bot, log_fn=lambda _msg: None
+        )
+
+    def send(self, text, chat_id=-100500, update_id=1):
+        self.bot.updates = [bot_message(text, chat_id, update_id)]
+        self.commander.handle()
+        return self.bot.sent[-1] if self.bot.sent else ""
+
+    def mute_list(self):
+        return self.send("/projects")
+
+    def test_projects_lists_config_keys(self):
+        self.assertIn("HSNS", self.mute_list())
+
+    def test_mute_adds_projects(self):
+        self.assertIn("Заглушил", self.send("/mute OPS tosh"))
+        self.assertIn("OPS", self.mute_list())
+        self.assertIn("TOSH", self.mute_list())
+
+    def test_unmute_removes_a_config_key(self):
+        self.send("/unmute hsns")
+        self.assertNotIn("HSNS", self.mute_list())
+
+    def test_mute_without_arguments_hints(self):
+        self.assertIn("/mute OPS", self.send("/mute"))
+
+    def test_invalid_key_is_rejected(self):
+        self.assertIn("Не похоже", self.send("/mute OPS-1"))
+
+    def test_other_chats_are_ignored(self):
+        self.assertEqual("", self.send("/mute OPS", chat_id=42))
+
+    def test_plain_messages_are_ignored(self):
+        self.assertEqual("", self.send("привет"))
+
+    def test_unknown_command_shows_help(self):
+        self.assertIn("/projects", self.send("/start"))
+
+    def test_offset_survives_restarts(self):
+        self.send("/projects", update_id=41)
+        with StateStore(self.jira.state_db) as store:
+            self.assertEqual(42, store.get_setting(OFFSET_SETTING))
+
+        self.commander.handle()
+        self.assertEqual(42, self.bot.offsets[-1])
+
+    def test_mute_and_unmute_drive_the_poller(self):
+        feed = FakeJira()
+        sent = FakeTelegram()
+        poller = Poller(
+            self.cfg,
+            jira=feed,
+            telegram=sent,
+            log_fn=lambda _msg: None,
+            commander=self.commander,
+        )
+
+        feed.issues = [make_issue(project="TEST", status="A")]
+        self.assertEqual(0, poller.poll_once(dry_run=True))
+
+        self.send("/mute TEST")
+        feed.issues = [make_issue(project="TEST", status="B")]
+        self.assertEqual(0, poller.poll_once(dry_run=True))
+
+        self.send("/unmute TEST")
+        feed.issues = [make_issue(project="TEST", status="C")]
+        self.assertEqual(1, poller.poll_once(dry_run=True))
+
+
 class TestConfig(unittest.TestCase):
     def test_load_defaults(self):
         path = tmpdir() / "config.toml"
@@ -658,10 +760,11 @@ projects_exclude = ["OPS", "support"]
         )
 
         cfg = load_config(path)
-        self.assertTrue(cfg.jira.excludes_project("OPS"))
-        self.assertTrue(cfg.jira.excludes_project("support"))
-        self.assertFalse(cfg.jira.excludes_project("TEST"))
-        self.assertFalse(cfg.jira.excludes_project(""))
+        excluded = effective_exclusions(cfg.jira.projects_exclude)
+        self.assertIn("OPS", excluded)
+        self.assertIn("SUPPORT", excluded)
+        self.assertNotIn("TEST", excluded)
+        self.assertEqual({"OPS", "SUPPORT"}, excluded)
 
     def test_ignore_self(self):
         path = tmpdir() / "config.toml"

@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS issues (
     comment_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS issues_updated ON issues(updated);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 UPSERT = """
@@ -120,6 +124,25 @@ class StateStore:
 
     def count(self) -> int:
         return int(self.db.execute("SELECT COUNT(*) FROM issues").fetchone()[0])
+
+    def get_setting(self, key: str, default=None):
+        row = self.db.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return default
+        try:
+            return json.loads(row["value"])
+        except ValueError:
+            return default
+
+    def set_setting(self, key: str, value) -> None:
+        self.db.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps(value)),
+        )
+        self.db.commit()
 
     def _import_legacy(self) -> None:
         if self.legacy_json is None or not self.legacy_json.exists():

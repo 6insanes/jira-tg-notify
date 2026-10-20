@@ -6,7 +6,13 @@ import signal
 import time
 import urllib.error
 
-from .config import Config
+from .config import (
+    Config,
+    MUTED_SETTING,
+    UNMUTED_SETTING,
+    effective_exclusions,
+    normalize_project_key,
+)
 from .events import FIELD_EVENTS, detect_events
 from .formatting import compose, compose_comment
 from .jira import JiraClient
@@ -24,6 +30,7 @@ from .storage import StateStore
 from .telegram import TelegramClient
 
 MIN_INTERVAL = 5
+COMMAND_TIMEOUT = 20
 
 
 class Poller:
@@ -33,11 +40,13 @@ class Poller:
         jira: JiraClient | None = None,
         telegram: TelegramClient | None = None,
         log_fn=log,
+        commander=None,
     ):
         self.cfg = cfg
         self.jira = jira or JiraClient(cfg.jira)
         self.telegram = telegram or TelegramClient(cfg.telegram)
         self.log = log_fn
+        self.commander = commander
         self._me: dict | None = None
 
     def me(self) -> dict:
@@ -65,6 +74,11 @@ class Poller:
             seeding = jcfg.seed and not known
             comments_on = "comment" in jcfg.events
             budget = jcfg.comment_max_per_poll
+            excluded = effective_exclusions(
+                jcfg.projects_exclude,
+                store.get_setting(MUTED_SETTING, []),
+                store.get_setting(UNMUTED_SETTING, []),
+            )
             sent = 0
 
             for issue in issues:
@@ -77,6 +91,7 @@ class Poller:
                     comments_on=comments_on,
                     budget=budget,
                     dry_run=dry_run,
+                    excluded=excluded,
                 )
 
             store.prune(now)
@@ -96,6 +111,9 @@ class Poller:
         signal.signal(signal.SIGTERM, handle)
         signal.signal(signal.SIGINT, handle)
 
+        if self.commander is not None and not once:
+            self.commander.register()
+
         while not stopping:
             started = time.time()
             try:
@@ -113,8 +131,22 @@ class Poller:
             if once:
                 break
 
+            if self.commander is not None:
+                self._handle_commands(time.time() - started)
+
             elapsed = time.time() - started
             time.sleep(max(MIN_INTERVAL, self.cfg.jira.interval - elapsed))
+
+    def _handle_commands(self, elapsed: float) -> None:
+        """Long-poll Telegram for /projects, /mute and /unmute."""
+        room = max(0, int(self.cfg.jira.interval - elapsed))
+        try:
+            self.commander.handle(min(COMMAND_TIMEOUT, room))
+        except urllib.error.HTTPError as err:
+            body = err.read().decode(errors="replace")[:200]
+            self.log(f"telegram command poll failed: HTTP {err.code} {body}")
+        except (RuntimeError, SystemExit, urllib.error.URLError) as err:
+            self.log(f"telegram command poll failed: {err}")
 
     def _process_issue(
         self,
@@ -127,6 +159,7 @@ class Poller:
         comments_on: bool,
         budget: int,
         dry_run: bool,
+        excluded: set[str],
     ) -> tuple[int, int]:
         jcfg = self.cfg.jira
         key = issue["key"]
@@ -136,10 +169,8 @@ class Poller:
         if old is not None and old.updated == new.updated and old.status == new.status:
             return 0, budget
 
-        if jcfg.excludes_project(new.project):
-            self.log(
-                f"{key}: project {new.project} is in projects_exclude, not notified"
-            )
+        if normalize_project_key(new.project) in excluded:
+            self.log(f"{key}: project {new.project} is muted, not notified")
             new.comment_id = old.comment_id if old is not None else None
             store.upsert(key, new)
             known[key] = new

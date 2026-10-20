@@ -12,6 +12,10 @@ DEFAULT_STATE_DB = "~/.local/state/jira-tg-notify/state.db"
 DEFAULT_LEGACY_STATE = "~/.local/state/jira-tg-notify/state.json"
 ALL_EVENTS = ("created", "status", "assignee", "priority", "comment")
 
+MUTED_SETTING = "projects_muted"
+UNMUTED_SETTING = "projects_unmuted"
+OFFSET_SETTING = "telegram_offset"
+
 
 @dataclass
 class JiraConfig:
@@ -33,13 +37,6 @@ class JiraConfig:
     ignore_self: bool = False
     legacy_state_file: Path | None = None
 
-    def excludes_project(self, project: str) -> bool:
-        """True when the project key is in ``notify.projects_exclude`` (any case)."""
-        key = (project or "").strip().upper()
-        return bool(key) and key in {
-            str(p).strip().upper() for p in self.projects_exclude
-        }
-
 
 @dataclass
 class TelegramConfig:
@@ -57,6 +54,19 @@ class Config:
 
 def expand(path: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(path)))
+
+
+def normalize_project_key(value: str) -> str:
+    return str(value or "").strip().upper()
+
+
+def effective_exclusions(base, muted=(), unmuted=()) -> set[str]:
+    """Config keys plus picks from Telegram, minus the ones switched back on."""
+    keys = {normalize_project_key(p) for p in base}
+    keys |= {normalize_project_key(p) for p in muted}
+    keys -= {normalize_project_key(p) for p in unmuted}
+    keys.discard("")
+    return keys
 
 
 def parse_interval(value) -> int:
