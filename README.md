@@ -96,6 +96,10 @@ tests/test_notify.py
 
 Зависимости передаются через конструкторы (`JiraClient(fetch=...)`, `Poller(jira=..., telegram=...)`), поэтому тесты не патчат глобальные функции. Полный прогон: `python3 -m unittest discover -s tests`.
 
+## Аватар бота
+
+`assets/bot-avatar.png` (512×512) — тёмно-синяя иконка с белой «J»; в 1024×1024 лежит рядом в `assets/bot-avatar@2x.png`. Загрузить: [@BotFather](https://t.me/BotFather) → `/setuserpic` → выбрать бота → отправить файл.
+
 ## Ограничения Jira Server (проверено на 9.16.1)
 
 | Параметр | Значение |
