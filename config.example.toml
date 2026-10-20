@@ -1,0 +1,37 @@
+# Jira -> Telegram notifier configuration.
+# Copy to ~/.config/jira-tg-notify/config.toml and fill in the values.
+
+[telegram]
+# BotFather token. NEVER commit this file.
+token = ""
+# Personal chat: "123456789"; group/supergroup: "-1001234567890".
+chat_id = ""
+# Only for forum topics in a supergroup; 0 disables it.
+message_thread_id = 0
+# api_base = "https://api.telegram.org"
+
+[jira]
+server = "https://jira.lms-digitsys.ru"
+# bearer = personal access token (PAT); basic = login + password.
+auth_type = "bearer"
+# Host used to read the token from ~/.netrc when api_token is empty.
+netrc_host = "jira.lms-digitsys.ru"
+# api_token = ""  # prefer ~/.netrc or JIRA_TOKEN over this file
+login = ""
+
+[notify]
+# Polled by JQL. Keep the window comfortably larger than the poll interval:
+# Jira indexes issue changes asynchronously.
+jql = "updated >= -10m ORDER BY updated ASC"
+interval = 60
+window_minutes = 10
+state_file = "~/.local/state/jira-tg-notify/state.json"
+# created = new issues, status/assignee/priority = field changes, comment = new comments.
+events = ["created", "status", "assignee", "priority", "comment"]
+# Comment notifications: excerpt length in characters and cap per poll.
+comment_chars = 400
+comment_max_per_poll = 10
+# Authors whose comments must not trigger a notification (display names).
+authors_exclude = []
+# true = the first run only remembers current issues instead of spamming history.
+seed = true

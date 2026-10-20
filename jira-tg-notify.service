@@ -1,0 +1,13 @@
+[Unit]
+Description=Jira -> Telegram notifier
+Documentation=file:%h/projects/jira-tg-notify/README.md
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/projects/jira-tg-notify/jira_tg_notify.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
