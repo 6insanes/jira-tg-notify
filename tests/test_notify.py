@@ -988,6 +988,8 @@ state_file = "~/state/state.json"
         self.assertEqual("updated >= -10m ORDER BY updated ASC", cfg.jira.jql)
         self.assertTrue(cfg.jira.seed)
         self.assertEqual(24, cfg.jira.catchup_hours)
+        self.assertIn("На ревью", cfg.jira.todo_jql)
+        self.assertIn("На тестировании", cfg.jira.todo_jql)
         self.assertEqual("-100500", cfg.telegram.chat_id)
         self.assertIsNone(cfg.telegram.thread_id)
         self.assertEqual("state.db", cfg.jira.state_db.name)

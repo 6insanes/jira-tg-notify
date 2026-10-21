@@ -11,7 +11,9 @@ from pathlib import Path
 DEFAULT_STATE_DB = "~/.local/state/jira-tg-notify/state.db"
 DEFAULT_LEGACY_STATE = "~/.local/state/jira-tg-notify/state.json"
 DEFAULT_TODO_JQL = (
-    "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
+    "assignee = currentUser() AND statusCategory != Done"
+    ' AND status NOT IN ("На ревью", "На тестировании")'
+    " ORDER BY updated DESC"
 )
 ALL_EVENTS = ("created", "status", "assignee", "priority", "comment")
 
