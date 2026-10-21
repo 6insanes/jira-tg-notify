@@ -50,3 +50,6 @@ ignore_self = false
 only_involved = false
 # true = the first run only remembers current issues instead of spamming history.
 seed = true
+# /todo in Telegram: which issues wait for you, and how many to show.
+# todo_jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
+todo_limit = 15

@@ -10,6 +10,9 @@ from pathlib import Path
 
 DEFAULT_STATE_DB = "~/.local/state/jira-tg-notify/state.db"
 DEFAULT_LEGACY_STATE = "~/.local/state/jira-tg-notify/state.json"
+DEFAULT_TODO_JQL = (
+    "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
+)
 ALL_EVENTS = ("created", "status", "assignee", "priority", "comment")
 
 MUTED_SETTING = "projects_muted"
@@ -38,6 +41,8 @@ class JiraConfig:
     ignore_self: bool = False
     only_involved: bool = False
     catchup_hours: int = 24
+    todo_jql: str = DEFAULT_TODO_JQL
+    todo_limit: int = 15
     legacy_state_file: Path | None = None
 
 
@@ -142,6 +147,8 @@ def load_config(path: Path) -> Config:
         ignore_self=bool(nt.get("ignore_self", False)),
         only_involved=bool(nt.get("only_involved", False)),
         catchup_hours=int(nt.get("catchup_hours", 24)),
+        todo_jql=nt.get("todo_jql") or DEFAULT_TODO_JQL,
+        todo_limit=int(nt.get("todo_limit", 15)),
     )
 
     telegram = TelegramConfig(

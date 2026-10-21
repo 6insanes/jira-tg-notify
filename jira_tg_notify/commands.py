@@ -1,7 +1,7 @@
-"""Telegram commands for the project blacklist.
+"""Telegram commands: the project blacklist and the personal to-do list.
 
-The config file holds the base list; commands only add to it or switch its
-entries off, so ``notify.projects_exclude`` keeps working as a default.
+The config file holds the base project list; commands only add to it or switch
+its entries off, so ``notify.projects_exclude`` keeps working as a default.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from .config import (
     effective_exclusions,
     normalize_project_key,
 )
+from .formatting import compose_todo
+from .jira import JiraClient
 from .log import log
 from .storage import StateStore
 from .telegram import TelegramClient
@@ -23,7 +25,8 @@ from .telegram import TelegramClient
 PROJECT_KEY = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 HELP = (
-    "<b>Чёрный список проектов</b>\n"
+    "<b>Что умею</b>\n"
+    "/todo — задачи, где нужно моё действие\n"
     "/projects — что заглушено сейчас\n"
     "/mute OPS TOSH — заглушить проекты\n"
     "/unmute OPS — вернуть уведомления\n\n"
@@ -32,25 +35,35 @@ HELP = (
 )
 
 COMMANDS = (
+    ("todo", "задачи, где нужно моё действие"),
     ("projects", "показать заглушённые проекты"),
     ("mute", "заглушить проекты: /mute OPS TOSH"),
     ("unmute", "вернуть уведомления: /unmute OPS"),
-    ("help", "как управлять списком"),
+    ("help", "что умеет бот"),
 )
 
 
 class Commander:
-    """Reads bot updates and applies /projects, /mute, /unmute."""
+    """Reads bot updates and answers /todo, /projects, /mute and /unmute."""
 
     def __init__(
         self,
         cfg: Config,
         telegram: TelegramClient | None = None,
         log_fn=log,
+        jira: JiraClient | None = None,
     ):
         self.cfg = cfg
         self.telegram = telegram or TelegramClient(cfg.telegram)
         self.log = log_fn
+        self._jira = jira
+
+    @property
+    def jira(self) -> JiraClient:
+        """Created on first use: the poller has its own client, commands need none."""
+        if self._jira is None:
+            self._jira = JiraClient(self.cfg.jira)
+        return self._jira
 
     def register(self) -> None:
         """Publish the command menu; failure only costs the hint in the UI."""
@@ -91,6 +104,9 @@ class Commander:
         command = head.split("@", 1)[0].lower()
         args = [part for arg in tail.split() for part in arg.split(",") if part]
 
+        if command in ("/todo", "/mine", "/tasks"):
+            self._todo()
+            return 1
         if command in ("/projects", "/list"):
             self._reply(self._render(store))
             return 1
@@ -101,6 +117,17 @@ class Commander:
 
         self._reply(HELP)
         return 1
+
+    def _todo(self) -> None:
+        jcfg = self.cfg.jira
+        try:
+            issues = self.jira.search(jcfg.todo_jql)
+        except (RuntimeError, SystemExit, OSError) as err:
+            self.log(f"todo list failed: {err}")
+            self._reply("Не получилось получить список из Jira, попробуй ещё раз.")
+            return
+
+        self._reply(compose_todo(issues, jcfg.server, jcfg.todo_limit))
 
     def _change(self, store: StateStore, args: list[str], *, mute: bool) -> int:
         name = "/mute" if mute else "/unmute"

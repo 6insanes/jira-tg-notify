@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import re
 
-from .models import IssueSnapshot, comment_id, display_name
+from .models import IssueSnapshot, build_snapshot, comment_id, display_name
 
 EVENT_ICONS = {
     "created": "🆕",
@@ -62,6 +62,25 @@ def clean_markup(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\s*\n\s*", "\n", text)
     return text.strip()
+
+
+def compose_todo(issues: list[dict], server: str, limit: int) -> str:
+    """A compact list of issues that wait for the token user."""
+    if not issues:
+        return "✅ Задач, где нужно твоё действие, нет."
+
+    blocks = [f"📋 <b>Мои задачи</b> · {len(issues)}"]
+    for issue in issues[:limit]:
+        snap = build_snapshot(issue, server)
+        blocks.append(
+            f"<b>{issue_link(issue['key'], snap)}</b> · {esc(snap.status)}\n"
+            f"<i>{esc(snap.summary)}</i>"
+        )
+    hidden = len(issues) - limit
+    if hidden > 0:
+        blocks.append(f"…и ещё {hidden}")
+
+    return "\n\n".join(blocks)
 
 
 def compose_comment(

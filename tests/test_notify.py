@@ -849,14 +849,58 @@ class TestCommander(unittest.TestCase):
         self.cfg = make_config(self.jira)
         self.cfg.telegram.chat_id = "-100500"
         self.bot = FakeBot()
+        self.feed = FakeJira()
         self.commander = Commander(
-            self.cfg, telegram=self.bot, log_fn=lambda _msg: None
+            self.cfg,
+            telegram=self.bot,
+            log_fn=lambda _msg: None,
+            jira=self.feed,
         )
 
     def send(self, text, chat_id=-100500, update_id=1):
         self.bot.updates = [bot_message(text, chat_id, update_id)]
         self.commander.handle()
         return self.bot.sent[-1] if self.bot.sent else ""
+
+    def test_todo_lists_assigned_issues(self):
+        self.feed.issues = [
+            make_issue(key="VPSH-78", project="VPSH", status="На тестировании")
+        ]
+
+        text = self.send("/todo")
+
+        self.assertIn("VPSH-78", text)
+        self.assertIn("На тестировании", text)
+        self.assertIn("browse/VPSH-78", text)
+
+    def test_todo_without_issues(self):
+        self.feed.issues = []
+        self.assertIn("нет", self.send("/todo"))
+
+    def test_todo_caps_the_list(self):
+        self.jira.todo_limit = 2
+        self.feed.issues = [make_issue(key=f"TEST-{n}") for n in range(5)]
+
+        text = self.send("/todo")
+
+        self.assertIn("TEST-0", text)
+        self.assertIn("TEST-1", text)
+        self.assertNotIn("TEST-2", text)
+        self.assertIn("…и ещё 3", text)
+
+    def test_todo_aliases(self):
+        self.feed.issues = []
+        self.assertIn("нет", self.send("/mine"))
+        self.assertIn("нет", self.send("/tasks"))
+
+    def test_todo_reports_a_jira_failure(self):
+        class Broken(FakeJira):
+            def search(self, jql=None):
+                raise OSError("boom")
+
+        self.commander._jira = Broken()
+
+        self.assertIn("Не получилось", self.send("/todo"))
 
     def mute_list(self):
         return self.send("/projects")
