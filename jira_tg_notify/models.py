@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
 JIRA_DATETIME = "%Y-%m-%dT%H:%M:%S.%f%z"
+MENTION = re.compile(r"\[~([^\]]+)\]")
 EMPTY = "—"
 
 
@@ -47,6 +49,18 @@ def same_person(a: dict | None, b: dict | None) -> bool:
         if a.get(field) and b.get(field):
             return a[field] == b[field]
     return a.get("displayName") == b.get("displayName")
+
+
+def mentions_person(text: str | None, person: dict | None) -> bool:
+    """True when the text contains a Jira mention of that user (``[~username]``)."""
+    if not text or not person:
+        return False
+    handles = {
+        str(person.get(field) or "").strip().lower()
+        for field in ("name", "key", "displayName")
+    }
+    handles.discard("")
+    return any(match.strip().lower() in handles for match in MENTION.findall(text))
 
 
 def build_snapshot(issue: dict, server: str) -> IssueSnapshot:

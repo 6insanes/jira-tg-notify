@@ -15,6 +15,7 @@ ALL_EVENTS = ("created", "status", "assignee", "priority", "comment")
 MUTED_SETTING = "projects_muted"
 UNMUTED_SETTING = "projects_unmuted"
 OFFSET_SETTING = "telegram_offset"
+LAST_POLL_SETTING = "last_poll_at"
 
 
 @dataclass
@@ -35,6 +36,8 @@ class JiraConfig:
     authors_exclude: list[str] = field(default_factory=list)
     projects_exclude: list[str] = field(default_factory=list)
     ignore_self: bool = False
+    only_involved: bool = False
+    catchup_hours: int = 24
     legacy_state_file: Path | None = None
 
 
@@ -137,6 +140,8 @@ def load_config(path: Path) -> Config:
         authors_exclude=list(nt.get("authors_exclude", [])),
         projects_exclude=list(nt.get("projects_exclude", [])),
         ignore_self=bool(nt.get("ignore_self", False)),
+        only_involved=bool(nt.get("only_involved", False)),
+        catchup_hours=int(nt.get("catchup_hours", 24)),
     )
 
     telegram = TelegramConfig(

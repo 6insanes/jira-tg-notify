@@ -9,7 +9,10 @@ import urllib.parse
 from .config import JiraConfig
 from .http import get_json
 
-FIELDS = "summary,status,assignee,priority,project,issuetype,created,updated,creator"
+FIELDS = (
+    "summary,status,assignee,reporter,priority,project,issuetype,"
+    "created,updated,creator,watches"
+)
 PAGE_SIZE = 100
 MAX_RESULTS = 1000
 COMMENT_PAGE = 100

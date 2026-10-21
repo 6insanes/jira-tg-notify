@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import math
+import re
 import signal
 import time
 import urllib.error
 
 from .config import (
     Config,
+    LAST_POLL_SETTING,
     MUTED_SETTING,
     UNMUTED_SETTING,
     effective_exclusions,
@@ -23,6 +26,7 @@ from .models import (
     display_name,
     epoch,
     max_comment_id,
+    mentions_person,
     pick_new_comments,
     same_person,
 )
@@ -31,6 +35,31 @@ from .telegram import TelegramClient
 
 MIN_INTERVAL = 5
 COMMAND_TIMEOUT = 20
+JQL_WINDOW = re.compile(r"updated\s*>=\s*-\s*\d+\s*[smhdw]", re.IGNORECASE)
+JQL_ORDER = re.compile(r"ORDER\s+BY\s+updated\s+ASC", re.IGNORECASE)
+
+
+def widen_jql(jql: str, minutes: int) -> str | None:
+    """Swap the relative window in JQL; None when the query has no such window.
+
+    Ordering flips to newest-first so a truncated or budget-capped catch-up
+    delivers the freshest changes instead of the oldest ones.
+    """
+    if not JQL_WINDOW.search(jql):
+        return None
+    widened = JQL_WINDOW.sub(f"updated >= -{minutes}m", jql, count=1)
+    return JQL_ORDER.sub("ORDER BY updated DESC", widened, count=1)
+
+
+def human_gap(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h" if hours else f"{days}d"
 
 
 class Poller:
@@ -54,7 +83,7 @@ class Poller:
         if self._me is None:
             try:
                 self._me = self.jira.myself() or {}
-            except (RuntimeError, SystemExit, urllib.error.URLError) as err:
+            except (RuntimeError, SystemExit, OSError) as err:
                 self.log(
                     f"cannot detect the current Jira user ({err}): "
                     "own actions will still notify"
@@ -69,8 +98,9 @@ class Poller:
             jcfg.state_db, jcfg.legacy_state_file, log_fn=self.log
         ) as store:
             known = store.load()
-            issues = self.jira.search(jcfg.jql)
             now = time.time()
+            jql, since = self._catchup(store, now)
+            issues = self.jira.search(jql)
             seeding = jcfg.seed and not known
             comments_on = "comment" in jcfg.events
             budget = jcfg.comment_max_per_poll
@@ -92,12 +122,44 @@ class Poller:
                     budget=budget,
                     dry_run=dry_run,
                     excluded=excluded,
+                    since=since,
                 )
 
             store.prune(now)
+            store.set_setting(LAST_POLL_SETTING, now)
 
         self._log_summary(len(issues), len(known), sent, seeding, verbose)
         return sent
+
+    def _catchup(self, store: StateStore, now: float) -> tuple[str, float | None]:
+        """Widen the query once when the previous poll is older than the window.
+
+        Covers a suspended laptop or a stopped service: the issues that changed
+        in the gap are fetched again and their comments filtered by age, so a
+        long downtime does not replay months of history.
+        """
+        jql = self.cfg.jira.jql
+        if not self.cfg.jira.catchup_hours:
+            return jql, None
+
+        last = store.get_setting(LAST_POLL_SETTING)
+        window = self.cfg.jira.window_minutes * 60
+        if last is None:
+            return jql, None
+
+        gap = now - float(last)
+        if gap <= window:
+            return jql, None
+
+        lookback = min(gap + window, self.cfg.jira.catchup_hours * 3600)
+        minutes = math.ceil(lookback / 60)
+        widened = widen_jql(jql, minutes)
+        if widened is None:
+            self.log("catch-up skipped: notify.jql has no 'updated >= -Nm' window")
+            return jql, None
+
+        self.log(f"catch-up: no polls for {human_gap(gap)}, looking back {minutes}m")
+        return widened, now - lookback
 
     def run(
         self, dry_run: bool = False, once: bool = False, verbose: bool = False
@@ -127,6 +189,12 @@ class Poller:
                 self.log(f"poll failed: {err}")
                 if once or not self.cfg.telegram.token:
                     raise
+            except (TimeoutError, ConnectionError) as err:
+                # Socket timeout or reset: the poll will be retried, and the
+                # widened catch-up window will cover the gap.
+                self.log(f"jira connection failed: {err}")
+                if once:
+                    raise
 
             if once:
                 break
@@ -145,7 +213,7 @@ class Poller:
         except urllib.error.HTTPError as err:
             body = err.read().decode(errors="replace")[:200]
             self.log(f"telegram command poll failed: HTTP {err.code} {body}")
-        except (RuntimeError, SystemExit, urllib.error.URLError) as err:
+        except (RuntimeError, SystemExit, OSError) as err:
             self.log(f"telegram command poll failed: {err}")
 
     def _process_issue(
@@ -160,6 +228,7 @@ class Poller:
         budget: int,
         dry_run: bool,
         excluded: set[str],
+        since: float | None = None,
     ) -> tuple[int, int]:
         jcfg = self.cfg.jira
         key = issue["key"]
@@ -176,12 +245,20 @@ class Poller:
             known[key] = new
             return 0, budget
 
+        need_comments = comments_on or jcfg.only_involved
         comments = self._fetch_comments(
-            key, old, new, seeding=seeding, comments_on=comments_on
+            key, old, new, seeding=seeding, need_comments=need_comments
         )
 
         if seeding:
-            new.comment_id = max_comment_id(comments) if comments_on else 0
+            new.comment_id = max_comment_id(comments) if need_comments else 0
+            store.upsert(key, new)
+            known[key] = new
+            return 0, budget
+
+        if jcfg.only_involved and not self._involved(issue, comments):
+            self.log(f"{key}: not my issue, not notified")
+            new.comment_id = max_comment_id(comments) if need_comments else 0
             store.upsert(key, new)
             known[key] = new
             return 0, budget
@@ -190,7 +267,7 @@ class Poller:
 
         if comments_on:
             comment_sent, budget = self._notify_comments(
-                key, old, new, comments, dry_run, budget
+                key, old, new, comments, dry_run, budget, since
             )
             sent += comment_sent
 
@@ -205,12 +282,40 @@ class Poller:
         new: IssueSnapshot,
         *,
         seeding: bool,
-        comments_on: bool,
+        need_comments: bool,
     ) -> list[dict]:
-        if not comments_on:
+        if not need_comments:
             return []
         changed = old is None or old.updated != new.updated
         return self.jira.comment_list(key) if seeding or changed else []
+
+    def _involved(self, issue: dict, comments: list[dict]) -> bool:
+        """Whether the token's user takes any part in the issue.
+
+        Signals: assignee, reporter, creator, watcher, comment author or a
+        ``[~username]`` mention in a comment. When the current user cannot be
+        read, nothing is filtered — better noisy than silent.
+        """
+        me = self.me()
+        if not me:
+            return True
+
+        fields = issue.get("fields") or {}
+        people = (
+            fields.get("assignee"),
+            fields.get("reporter"),
+            fields.get("creator"),
+        )
+        if any(same_person(person, me) for person in people):
+            return True
+        if (fields.get("watches") or {}).get("isWatching"):
+            return True
+
+        return any(
+            same_person(comment.get("author"), me)
+            or mentions_person(comment.get("body"), me)
+            for comment in comments
+        )
 
     def _notify_changes(
         self,
@@ -277,6 +382,7 @@ class Poller:
         comments: list[dict],
         dry_run: bool,
         budget: int,
+        since: float | None = None,
     ) -> tuple[int, int]:
         jcfg = self.cfg.jira
         last_id = old.comment_id if old is not None else None
@@ -286,10 +392,11 @@ class Poller:
             for c in pick_new_comments(comments, last_id or 0)
             if display_name(c.get("author")) not in jcfg.authors_exclude
             and not (me and same_person(c.get("author"), me))
+            and (since is None or epoch(c.get("created")) >= since)
         ]
 
         sent = 0
-        if last_id is not None:
+        if last_id is not None or since is not None:
             allowed = max(0, min(len(fresh), budget))
             for comment in fresh[:allowed]:
                 self._send(

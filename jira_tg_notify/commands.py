@@ -7,7 +7,6 @@ entries off, so ``notify.projects_exclude`` keeps working as a default.
 from __future__ import annotations
 
 import re
-import urllib.error
 
 from .config import (
     MUTED_SETTING,
@@ -57,7 +56,7 @@ class Commander:
         """Publish the command menu; failure only costs the hint in the UI."""
         try:
             self.telegram.set_commands(COMMANDS)
-        except (RuntimeError, SystemExit, urllib.error.URLError) as err:
+        except (RuntimeError, SystemExit, OSError) as err:
             self.log(f"cannot publish bot commands: {err}")
 
     def handle(self, timeout: int = 0) -> int:

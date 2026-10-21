@@ -1,4 +1,7 @@
 import json
+import os
+import re
+import signal
 import sys
 import tempfile
 import time
@@ -6,6 +9,7 @@ import unittest
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -13,6 +17,7 @@ from jira_tg_notify.commands import Commander  # noqa: E402
 from jira_tg_notify.config import (  # noqa: E402
     Config,
     JiraConfig,
+    LAST_POLL_SETTING,
     OFFSET_SETTING,
     TelegramConfig,
     effective_exclusions,
@@ -94,6 +99,9 @@ def make_issue(
     project="TEST",
     creator="Пётр",
     creator_name="petr",
+    reporter=None,
+    reporter_name=None,
+    watcher=False,
 ):
     now = time.time()
 
@@ -106,18 +114,24 @@ def make_issue(
             "priority": {"name": priority},
             "project": {"key": project},
             "creator": {"displayName": creator, "name": creator_name},
+            "reporter": (
+                {"displayName": reporter, "name": reporter_name or reporter.lower()}
+                if reporter
+                else None
+            ),
+            "watches": {"watchCount": int(bool(watcher)), "isWatching": bool(watcher)},
             "created": to_jira(created if created is not None else now - 3600),
             "updated": to_jira(updated if updated is not None else now),
         },
     }
 
 
-def make_comment(cid, author="Пётр", body="Текст комментария", name=None):
+def make_comment(cid, author="Пётр", body="Текст комментария", name=None, created=None):
     return {
         "id": str(cid),
         "author": {"displayName": author, "name": name or author.lower()},
         "body": body,
-        "created": "2026-10-20T10:00:00.000+0300",
+        "created": to_jira(created if created is not None else time.time()),
     }
 
 
@@ -136,9 +150,11 @@ class FakeJira:
         self.comment_calls: list[str] = []
         self.histories: dict[str, list[dict]] = {}
         self.changelog_calls: list[str] = []
+        self.jqls: list[str] = []
         self.me = {"name": "igor", "key": "JIRAUSER1", "displayName": "Игорь"}
 
     def search(self, jql=None):
+        self.jqls.append(jql or "")
         return self.issues
 
     def comment_list(self, key):
@@ -389,6 +405,139 @@ class TestPoll(PollerTestCase):
         self.assertFalse(legacy.exists())
 
 
+class TestCatchup(PollerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.jira.events = {"created", "status", "assignee", "priority", "comment"}
+
+    def rewind(self, seconds):
+        with StateStore(self.jira.state_db) as store:
+            store.set_setting(LAST_POLL_SETTING, time.time() - seconds)
+
+    def lookback(self):
+        match = re.search(r"updated >= -(\d+)m", self.feed.jqls[-1])
+        self.assertIsNotNone(match, self.feed.jqls[-1])
+        return int(match.group(1))
+
+    def test_no_gap_keeps_the_configured_jql(self):
+        self.poller.poll_once(dry_run=True)
+        self.assertEqual("updated >= -10m ORDER BY updated ASC", self.feed.jqls[-1])
+
+    def test_downtime_widens_the_window(self):
+        self.poller.poll_once(dry_run=True)
+        self.rewind(2 * 3600)
+
+        self.poller.poll_once(dry_run=True)
+
+        self.assertGreaterEqual(self.lookback(), 120)
+        self.assertLessEqual(self.lookback(), 135)
+        self.assertTrue(self.feed.jqls[-1].endswith("ORDER BY updated DESC"))
+
+    def test_long_downtime_is_capped(self):
+        self.jira.catchup_hours = 6
+        self.poller.poll_once(dry_run=True)
+        self.rewind(3 * 24 * 3600)
+
+        self.poller.poll_once(dry_run=True)
+
+        self.assertEqual(6 * 60, self.lookback())
+
+    def test_catchup_can_be_disabled(self):
+        self.jira.catchup_hours = 0
+        self.poller.poll_once(dry_run=True)
+        self.rewind(2 * 3600)
+
+        self.poller.poll_once(dry_run=True)
+
+        self.assertEqual("updated >= -10m ORDER BY updated ASC", self.feed.jqls[-1])
+
+    def test_catchup_needs_a_relative_window(self):
+        self.jira.jql = "project = TEST ORDER BY updated ASC"
+        self.poller.poll_once(dry_run=True)
+        self.rewind(2 * 3600)
+
+        self.poller.poll_once(dry_run=True)
+
+        self.assertEqual("project = TEST ORDER BY updated ASC", self.feed.jqls[-1])
+
+    def test_comment_from_the_gap_is_delivered(self):
+        self.feed.issues = [make_issue(key="TEST-0", status="Backlog")]
+        self.poller.poll_once(dry_run=True)
+        self.rewind(3 * 3600)
+
+        comment = make_comment(11719, author="Мария", created=time.time() - 2 * 3600)
+        self.feed.issues = [
+            make_issue(
+                key="VPSH-78",
+                created=time.time() - 5 * 86400,
+                updated=time.time() - 2 * 3600,
+            )
+        ]
+        self.feed.comments = {"VPSH-78": [comment]}
+
+        self.assertEqual(1, self.poller.poll_once(dry_run=True))
+        self.assertEqual(11719, self.stored()["VPSH-78"].comment_id)
+
+    def test_comment_older_than_the_gap_is_not_replayed(self):
+        self.feed.issues = [make_issue(key="TEST-0", status="Backlog")]
+        self.poller.poll_once(dry_run=True)
+        self.rewind(3 * 3600)
+
+        comment = make_comment(1, created=time.time() - 5 * 86400)
+        self.feed.issues = [make_issue(key="OLD-1", created=time.time() - 9 * 86400)]
+        self.feed.comments = {"OLD-1": [comment]}
+
+        self.assertEqual(0, self.poller.poll_once(dry_run=True))
+
+
+class TestResilience(unittest.TestCase):
+    def test_command_timeout_is_logged_not_raised(self):
+        logs = []
+
+        class Boom:
+            def handle(self, timeout=0):
+                raise TimeoutError("The read operation timed out")
+
+        poller = Poller(
+            make_config(),
+            jira=FakeJira(),
+            telegram=FakeTelegram(),
+            log_fn=logs.append,
+            commander=Boom(),
+        )
+
+        poller._handle_commands(1.0)
+
+        self.assertTrue(any("timed out" in line for line in logs))
+
+    def test_daemon_survives_a_socket_timeout(self):
+        logs = []
+
+        class FlakyJira(FakeJira):
+            calls = 0
+
+            def search(self, jql=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise TimeoutError("The read operation timed out")
+                os.kill(os.getpid(), signal.SIGTERM)
+                return []
+
+        jira = FlakyJira()
+        poller = Poller(
+            make_config(),
+            jira=jira,
+            telegram=FakeTelegram(),
+            log_fn=logs.append,
+        )
+
+        with mock.patch("jira_tg_notify.poller.time.sleep", lambda _s: None):
+            poller.run()
+
+        self.assertEqual(2, jira.calls)
+        self.assertTrue(any("timed out" in line for line in logs))
+
+
 class TestComments(PollerTestCase):
     def setUp(self):
         super().setUp()
@@ -621,6 +770,79 @@ class TestIgnoreSelf(PollerTestCase):
         self.assertEqual([], self.feed.changelog_calls)
 
 
+class TestInvolvement(PollerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.jira.only_involved = True
+        self.jira.events = {"created", "status", "assignee", "priority", "comment"}
+
+    def seed(self, **issue_kwargs):
+        self.feed.issues = [make_issue(key="TEST-1", status="A", **issue_kwargs)]
+        return self.poller.poll_once(dry_run=True)
+
+    def change(self, **issue_kwargs):
+        self.feed.issues = [make_issue(key="TEST-1", status="B", **issue_kwargs)]
+        return self.poller.poll_once(dry_run=True)
+
+    def test_unrelated_issue_is_silent_and_remembered(self):
+        self.seed()
+        self.assertEqual(0, self.change())
+        self.assertEqual("B", self.stored()["TEST-1"].status)
+
+    def test_assignee_is_notified(self):
+        self.seed(assignee="Игорь")
+        self.assertEqual(1, self.change(assignee="Игорь"))
+
+    def test_reporter_is_notified(self):
+        self.seed(reporter="Игорь", reporter_name="igor")
+        self.assertEqual(1, self.change(reporter="Игорь", reporter_name="igor"))
+
+    def test_creator_is_notified(self):
+        self.seed(creator="Игорь", creator_name="igor")
+        self.assertEqual(1, self.change(creator="Игорь", creator_name="igor"))
+
+    def test_watcher_is_notified(self):
+        self.seed(watcher=True)
+        self.assertEqual(1, self.change(watcher=True))
+
+    def test_comment_author_is_notified(self):
+        self.feed.comments = {"TEST-1": [make_comment(10, author="Игорь", name="igor")]}
+        self.seed()
+        self.assertEqual(1, self.change())
+
+    def test_mentioned_user_is_notified(self):
+        self.feed.comments = {
+            "TEST-1": [make_comment(10, author="Анна", body="Глянь [~igor], плиз")]
+        }
+        self.seed()
+        self.assertEqual(1, self.change())
+
+    def test_mention_of_someone_else_stays_silent(self):
+        self.seed()
+        self.feed.comments = {
+            "TEST-1": [make_comment(10, author="Анна", body="Глянь [~petr]")]
+        }
+        self.assertEqual(0, self.change())
+
+    def test_unknown_user_notifies_everything(self):
+        self.feed.me = {}
+        self.seed()
+        self.assertEqual(1, self.change())
+
+    def test_off_by_default(self):
+        self.jira.only_involved = False
+        self.seed()
+        self.assertEqual(1, self.change())
+
+    def test_involvement_works_without_comment_events(self):
+        self.jira.events = {"status"}
+        self.seed()
+        self.feed.comments = {"TEST-1": [make_comment(10, author="Игорь", name="igor")]}
+
+        self.assertEqual(1, self.change())
+        self.assertIn("TEST-1", self.feed.comment_calls)
+
+
 class TestCommander(unittest.TestCase):
     def setUp(self):
         self.jira = make_jira(projects_exclude=["HSNS"])
@@ -721,6 +943,7 @@ state_file = "~/state/state.json"
         self.assertEqual(120, cfg.jira.interval)
         self.assertEqual("updated >= -10m ORDER BY updated ASC", cfg.jira.jql)
         self.assertTrue(cfg.jira.seed)
+        self.assertEqual(24, cfg.jira.catchup_hours)
         self.assertEqual("-100500", cfg.telegram.chat_id)
         self.assertIsNone(cfg.telegram.thread_id)
         self.assertEqual("state.db", cfg.jira.state_db.name)
@@ -778,6 +1001,19 @@ ignore_self = true
 """
         )
         self.assertTrue(load_config(path).jira.ignore_self)
+
+    def test_only_involved(self):
+        path = tmpdir() / "config.toml"
+        path.write_text(
+            """
+[jira]
+server = "https://jira.example.com"
+
+[notify]
+only_involved = true
+"""
+        )
+        self.assertTrue(load_config(path).jira.only_involved)
 
 
 if __name__ == "__main__":

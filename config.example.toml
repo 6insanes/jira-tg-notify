@@ -22,9 +22,12 @@ login = ""
 [notify]
 # Polled by JQL. Keep the window comfortably larger than the poll interval:
 # Jira indexes issue changes asynchronously.
-jql = "updated >= -10m ORDER BY updated ASC"
+jql = "updated >= -30m ORDER BY updated ASC"
 interval = 60
-window_minutes = 10
+window_minutes = 30
+# After a gap (laptop asleep, service down) look further back once, up to this
+# many hours, and deliver what was missed. 0 disables the catch-up.
+catchup_hours = 24
 state_db = "~/.local/state/jira-tg-notify/state.db"
 # Старый JSON-файл состояния (до 2.0) импортируется один раз и переименовывается.
 # state_file = "~/.local/state/jira-tg-notify/state.json"
@@ -42,5 +45,8 @@ projects_exclude = []
 # Skip notifications about your own actions: your comments, your status/assignee/
 # priority changes and issues you created. The user is resolved from the token.
 ignore_self = false
+# Only issues you take part in: assignee, reporter, creator, watcher, comment
+# author or a [~username] mention. Everything else is remembered silently.
+only_involved = false
 # true = the first run only remembers current issues instead of spamming history.
 seed = true
