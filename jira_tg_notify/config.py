@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 import urllib.parse
 from dataclasses import dataclass, field
@@ -11,10 +12,9 @@ from pathlib import Path
 DEFAULT_STATE_DB = "~/.local/state/jira-tg-notify/state.db"
 DEFAULT_LEGACY_STATE = "~/.local/state/jira-tg-notify/state.json"
 DEFAULT_TODO_JQL = (
-    "assignee = currentUser() AND statusCategory != Done"
-    ' AND status NOT IN ("На ревью", "На тестировании")'
-    " ORDER BY updated DESC"
+    "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
 )
+ORDER_BY = re.compile(r"\s+ORDER\s+BY\s+", re.IGNORECASE)
 ALL_EVENTS = ("created", "status", "assignee", "priority", "comment")
 
 MUTED_SETTING = "projects_muted"
@@ -45,6 +45,7 @@ class JiraConfig:
     catchup_hours: int = 24
     todo_jql: str = DEFAULT_TODO_JQL
     todo_limit: int = 15
+    todo_exclude_statuses: list[str] = field(default_factory=list)
     legacy_state_file: Path | None = None
 
 
@@ -68,6 +69,30 @@ def expand(path: str) -> Path:
 
 def normalize_project_key(value: str) -> str:
     return str(value or "").strip().upper()
+
+
+def todo_query(cfg: JiraConfig) -> str:
+    """The todo JQL with the statuses that are not your move appended.
+
+    The condition lands before ``ORDER BY`` so ``notify.todo_jql`` keeps its
+    sorting; a query without ``ORDER BY`` is parenthesised first, otherwise a
+    top-level ``OR`` would swallow the new condition.
+    """
+    statuses = [str(s).strip() for s in cfg.todo_exclude_statuses if str(s).strip()]
+    if not statuses:
+        return cfg.todo_jql
+
+    quoted = ", ".join('"' + s.replace('"', '\\"') + '"' for s in statuses)
+    condition = f"status NOT IN ({quoted})"
+
+    match = ORDER_BY.search(cfg.todo_jql)
+    if match is None:
+        return f"({cfg.todo_jql}) AND {condition}"
+
+    return (
+        f"{cfg.todo_jql[: match.start()]} AND {condition}"
+        f"{cfg.todo_jql[match.start() :]}"
+    )
 
 
 def effective_exclusions(base, muted=(), unmuted=()) -> set[str]:
@@ -151,6 +176,7 @@ def load_config(path: Path) -> Config:
         catchup_hours=int(nt.get("catchup_hours", 24)),
         todo_jql=nt.get("todo_jql") or DEFAULT_TODO_JQL,
         todo_limit=int(nt.get("todo_limit", 15)),
+        todo_exclude_statuses=list(nt.get("todo_exclude_statuses", [])),
     )
 
     telegram = TelegramConfig(

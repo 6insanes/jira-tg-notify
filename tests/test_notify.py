@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from jira_tg_notify.commands import Commander  # noqa: E402
 from jira_tg_notify.config import (  # noqa: E402
+    DEFAULT_TODO_JQL,
     Config,
     JiraConfig,
     LAST_POLL_SETTING,
@@ -23,6 +24,7 @@ from jira_tg_notify.config import (  # noqa: E402
     effective_exclusions,
     load_config,
     parse_interval,
+    todo_query,
 )
 from jira_tg_notify.events import detect_events  # noqa: E402
 from jira_tg_notify.formatting import (  # noqa: E402
@@ -893,6 +895,15 @@ class TestCommander(unittest.TestCase):
         self.assertIn("нет", self.send("/mine"))
         self.assertIn("нет", self.send("/tasks"))
 
+    def test_todo_applies_excluded_statuses(self):
+        self.jira.todo_exclude_statuses = ["На ревью"]
+
+        self.feed.issues = []
+        self.send("/todo")
+
+        self.assertIn('status NOT IN ("На ревью")', self.feed.jqls[-1])
+        self.assertIn("ORDER BY updated DESC", self.feed.jqls[-1])
+
     def test_todo_reports_a_jira_failure(self):
         class Broken(FakeJira):
             def search(self, jql=None):
@@ -988,8 +999,7 @@ state_file = "~/state/state.json"
         self.assertEqual("updated >= -10m ORDER BY updated ASC", cfg.jira.jql)
         self.assertTrue(cfg.jira.seed)
         self.assertEqual(24, cfg.jira.catchup_hours)
-        self.assertIn("На ревью", cfg.jira.todo_jql)
-        self.assertIn("На тестировании", cfg.jira.todo_jql)
+        self.assertEqual([], cfg.jira.todo_exclude_statuses)
         self.assertEqual("-100500", cfg.telegram.chat_id)
         self.assertIsNone(cfg.telegram.thread_id)
         self.assertEqual("state.db", cfg.jira.state_db.name)
@@ -1047,6 +1057,43 @@ ignore_self = true
 """
         )
         self.assertTrue(load_config(path).jira.ignore_self)
+
+    def test_todo_exclude_statuses(self):
+        path = tmpdir() / "config.toml"
+        path.write_text(
+            """
+[jira]
+server = "https://jira.example.com"
+
+[notify]
+todo_exclude_statuses = ["На ревью", "On review"]
+"""
+        )
+        self.assertEqual(
+            ["На ревью", "On review"],
+            load_config(path).jira.todo_exclude_statuses,
+        )
+
+    def test_todo_query_without_exclusions(self):
+        self.assertEqual(DEFAULT_TODO_JQL, todo_query(make_jira()))
+
+    def test_todo_query_appends_before_order_by(self):
+        jira = make_jira(todo_exclude_statuses=["На ревью", "На тестировании"])
+        query = todo_query(jira)
+
+        self.assertTrue(query.startswith(DEFAULT_TODO_JQL.split(" ORDER BY")[0]))
+        self.assertIn('AND status NOT IN ("На ревью", "На тестировании")', query)
+        self.assertTrue(query.endswith("ORDER BY updated DESC"))
+
+    def test_todo_query_wraps_a_query_without_order_by(self):
+        jira = make_jira(todo_jql="project = A OR project = B", todo_exclude_statuses=["X"])
+        self.assertEqual(
+            '(project = A OR project = B) AND status NOT IN ("X")', todo_query(jira)
+        )
+
+    def test_todo_query_escapes_quotes(self):
+        jira = make_jira(todo_exclude_statuses=['He said "no"'])
+        self.assertIn('status NOT IN ("He said \\"no\\"")', todo_query(jira))
 
     def test_only_involved(self):
         path = tmpdir() / "config.toml"

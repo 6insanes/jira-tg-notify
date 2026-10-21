@@ -51,6 +51,8 @@ only_involved = false
 # true = the first run only remembers current issues instead of spamming history.
 seed = true
 # /todo in Telegram: which issues wait for you, and how many to show.
-# On review / on testing are somebody else's move, so they are skipped by default.
-# todo_jql = 'assignee = currentUser() AND statusCategory != Done AND status NOT IN ("На ревью", "На тестировании") ORDER BY updated DESC'
+# todo_jql = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"
 todo_limit = 15
+# Statuses where somebody else is on the hook: cut from /todo only, never from
+# notifications. Empty list = every open issue assigned to you.
+todo_exclude_statuses = ["На ревью", "На тестировании"]

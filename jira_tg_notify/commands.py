@@ -15,6 +15,7 @@ from .config import (
     Config,
     effective_exclusions,
     normalize_project_key,
+    todo_query,
 )
 from .formatting import compose_todo
 from .jira import JiraClient
@@ -121,7 +122,7 @@ class Commander:
     def _todo(self) -> None:
         jcfg = self.cfg.jira
         try:
-            issues = self.jira.search(jcfg.todo_jql)
+            issues = self.jira.search(todo_query(jcfg))
         except (RuntimeError, SystemExit, OSError) as err:
             self.log(f"todo list failed: {err}")
             self._reply("Не получилось получить список из Jira, попробуй ещё раз.")
